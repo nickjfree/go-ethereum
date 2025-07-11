@@ -32,6 +32,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/eth"
 )
 
 var (
@@ -198,6 +200,111 @@ func (api *FilterAPI) NewPendingTransactions(ctx context.Context, fullTx *bool) 
 
 	return rpcSub, nil
 }
+
+// NewPendingTransactionsWithLog creates a subscription that is triggered each time a
+// transaction enters the transaction pool. If fullTx is true the full tx is
+// sent to the client, otherwise the hash is sent.
+func (api *FilterAPI) NewPendingTransactionWithLogs(ctx context.Context, fullTx *bool) (*rpc.Subscription, error) {
+	notifier, supported := rpc.NotifierFromContext(ctx)
+	if !supported {
+		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	rpcSub := notifier.CreateSubscription()
+
+	go func() {
+		txs := make(chan []*types.Transaction, 128)
+		pendingTxSub := api.events.SubscribePendingTxs(txs)
+		defer pendingTxSub.Unsubscribe()
+
+		chainConfig := api.sys.backend.ChainConfig()
+
+		for {
+			select {
+			case txs := <-txs:
+				// To keep the original behaviour, send a single tx hash in one notification.
+				// TODO(rjl493456442) Send a batch of tx hashes in one notification
+				latest := api.sys.backend.CurrentHeader()
+				for _, tx := range txs {
+					if fullTx != nil && *fullTx {
+						logs, err := api.simulateTxForLogs(ctx, tx)
+                    	if err != nil {
+                        	continue // Skip transactions that can't be simulated
+                    	}
+	                   	// TODO: filter the logs
+
+	                   	// construct the payload
+						rpcTx := ethapi.NewRPCPendingTransaction(tx, latest, chainConfig)
+						payload := map[string]interface{}{
+                            "tx": rpcTx,
+                            "logs": logs,
+                        }
+						notifier.Notify(rpcSub.ID, payload)
+					} else {
+						notifier.Notify(rpcSub.ID, tx.Hash())
+					}
+				}
+			case <-rpcSub.Err():
+				return
+			}
+		}
+	}()
+
+	return rpcSub, nil
+}
+
+
+
+// simulateTxForLogs simulates a pending transaction to extract its logs
+func (api *FilterAPI) simulateTxForLogs(ctx context.Context, tx *types.Transaction) ([]*types.Log, error) {
+    // Get current state
+    header := api.sys.backend.CurrentHeader()
+
+    // get the backend
+    backend, ok := api.sys.backend.(*eth.EthAPIBackend)
+    if !ok {
+    	return nil, errors.New("api.sys.backend is not eth.EthAPIBackend")
+    }
+    statedb, header, err := backend.StateAndHeaderByNumber(ctx, rpc.BlockNumber(header.Number.Int64()))
+    if err != nil {
+        return nil, err
+    }
+
+    // Create a copy of state for simulation
+    statedb = statedb.Copy()
+
+    // get evm
+    evm := backend.GetEVM(ctx, statedb, header, nil, nil)
+
+    // Prepare the transaction
+    signer := types.MakeSigner(api.sys.backend.ChainConfig(), header.Number, header.Time)
+    msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
+    if err != nil {
+        return nil, err
+    }
+
+    // Set transaction context in state
+    statedb.SetTxContext(tx.Hash(), 0)
+
+    // Prepare state for transaction execution
+    statedb.Prepare(evm.ChainConfig().Rules(header.Number, true, header.Time), msg.From, header.Coinbase, msg.To, nil, tx.AccessList())
+
+    // Execute the transaction
+    gasPool := new(core.GasPool).AddGas(header.GasLimit)
+    var usedGas uint64
+    
+    _, err = core.ApplyTransactionWithEVM(msg, gasPool, statedb, header.Number, header.Hash(), header.Time, tx, &usedGas, evm)
+    if err != nil {
+        return nil, err
+    }
+
+    // Extract logs from the state
+    logs := statedb.GetLogs(tx.Hash(), header.Number.Uint64(), header.Hash(), header.Time)
+    
+    return logs, nil
+}
+
+
 
 // NewBlockFilter creates a filter that fetches blocks that are imported into the chain.
 // It is part of the filter package since polling goes with eth_getFilterChanges.
