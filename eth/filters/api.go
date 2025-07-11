@@ -28,12 +28,12 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/eth"
 )
 
 var (
@@ -228,17 +228,17 @@ func (api *FilterAPI) NewPendingTransactionWithLogs(ctx context.Context, fullTx 
 				for _, tx := range txs {
 					if fullTx != nil && *fullTx {
 						logs, err := api.simulateTxForLogs(ctx, tx)
-                    	if err != nil {
-                        	continue // Skip transactions that can't be simulated
-                    	}
-	                   	// TODO: filter the logs
+						if err != nil {
+							continue // Skip transactions that can't be simulated
+						}
+						// TODO: filter the logs
 
-	                   	// construct the payload
+						// construct the payload
 						rpcTx := ethapi.NewRPCPendingTransaction(tx, latest, chainConfig)
 						payload := map[string]interface{}{
-                            "tx": rpcTx,
-                            "logs": logs,
-                        }
+							"tx":   rpcTx,
+							"logs": logs,
+						}
 						notifier.Notify(rpcSub.ID, payload)
 					} else {
 						notifier.Notify(rpcSub.ID, tx.Hash())
@@ -253,58 +253,54 @@ func (api *FilterAPI) NewPendingTransactionWithLogs(ctx context.Context, fullTx 
 	return rpcSub, nil
 }
 
-
-
 // simulateTxForLogs simulates a pending transaction to extract its logs
 func (api *FilterAPI) simulateTxForLogs(ctx context.Context, tx *types.Transaction) ([]*types.Log, error) {
-    // Get current state
-    header := api.sys.backend.CurrentHeader()
+	// Get current state
+	header := api.sys.backend.CurrentHeader()
 
-    // get the backend
-    backend, ok := api.sys.backend.(*eth.EthAPIBackend)
-    if !ok {
-    	return nil, errors.New("api.sys.backend is not eth.EthAPIBackend")
-    }
-    statedb, header, err := backend.StateAndHeaderByNumber(ctx, rpc.BlockNumber(header.Number.Int64()))
-    if err != nil {
-        return nil, err
-    }
+	// get the backend
+	backend, ok := api.sys.backend.(*eth.EthAPIBackend)
+	if !ok {
+		return nil, errors.New("api.sys.backend is not eth.EthAPIBackend")
+	}
+	statedb, header, err := backend.StateAndHeaderByNumber(ctx, rpc.BlockNumber(header.Number.Int64()))
+	if err != nil {
+		return nil, err
+	}
 
-    // Create a copy of state for simulation
-    statedb = statedb.Copy()
+	// Create a copy of state for simulation
+	statedb = statedb.Copy()
 
-    // get evm
-    evm := backend.GetEVM(ctx, statedb, header, nil, nil)
+	// get evm
+	evm := backend.GetEVM(ctx, statedb, header, nil, nil)
 
-    // Prepare the transaction
-    signer := types.MakeSigner(api.sys.backend.ChainConfig(), header.Number, header.Time)
-    msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
-    if err != nil {
-        return nil, err
-    }
+	// Prepare the transaction
+	signer := types.MakeSigner(api.sys.backend.ChainConfig(), header.Number, header.Time)
+	msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
+	if err != nil {
+		return nil, err
+	}
 
-    // Set transaction context in state
-    statedb.SetTxContext(tx.Hash(), 0)
+	// Set transaction context in state
+	statedb.SetTxContext(tx.Hash(), 0)
 
-    // Prepare state for transaction execution
-    statedb.Prepare(evm.ChainConfig().Rules(header.Number, true, header.Time), msg.From, header.Coinbase, msg.To, nil, tx.AccessList())
+	// Prepare state for transaction execution
+	statedb.Prepare(evm.ChainConfig().Rules(header.Number, true, header.Time), msg.From, header.Coinbase, msg.To, nil, tx.AccessList())
 
-    // Execute the transaction
-    gasPool := new(core.GasPool).AddGas(header.GasLimit)
-    var usedGas uint64
-    
-    _, err = core.ApplyTransactionWithEVM(msg, gasPool, statedb, header.Number, header.Hash(), header.Time, tx, &usedGas, evm)
-    if err != nil {
-        return nil, err
-    }
+	// Execute the transaction
+	gasPool := new(core.GasPool).AddGas(header.GasLimit)
+	var usedGas uint64
 
-    // Extract logs from the state
-    logs := statedb.GetLogs(tx.Hash(), header.Number.Uint64(), header.Hash(), header.Time)
-    
-    return logs, nil
+	_, err = core.ApplyTransactionWithEVM(msg, gasPool, statedb, header.Number, header.Hash(), header.Time, tx, &usedGas, evm)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract logs from the state
+	logs := statedb.GetLogs(tx.Hash(), header.Number.Uint64(), header.Hash(), header.Time)
+
+	return logs, nil
 }
-
-
 
 // NewBlockFilter creates a filter that fetches blocks that are imported into the chain.
 // It is part of the filter package since polling goes with eth_getFilterChanges.
