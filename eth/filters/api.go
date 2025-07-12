@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -43,6 +44,22 @@ var (
 	errPendingLogsUnsupported = errors.New("pending logs are not supported")
 	errExceedMaxTopics        = errors.New("exceed max topics")
 	errExceedMaxAddresses     = errors.New("exceed max addresses")
+
+	// Uniswap V2: Sync(uint112,uint112)
+	UniswapV2SyncTopic = crypto.Keccak256Hash([]byte("Sync(uint112,uint112)"))
+	// Uniswap V3: Swap(address,address,int256,int256,uint160,uint128,int24)
+	UniswapV3SwapTopic = crypto.Keccak256Hash([]byte("Swap(address,address,int256,int256,uint160,uint128,int24)"))
+	// PancakeSwap V3: Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)
+	PancakeV3SwapTopic = crypto.Keccak256Hash([]byte("Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)"))
+	// Uniswap V4: Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrt_price_x96, uint128 liquidity, int24 tick, uint24 fee)
+	UniswapV4SwapTopic = crypto.Keccak256Hash([]byte("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)"))
+
+	allowedTopics = map[common.Hash]bool{
+		UniswapV2SyncTopic: true,
+		UniswapV3SwapTopic: true,
+		PancakeV3SwapTopic: true,
+		UniswapV4SwapTopic: true,
+	}
 )
 
 const (
@@ -231,13 +248,16 @@ func (api *FilterAPI) NewPendingTransactionWithLogs(ctx context.Context, fullTx 
 						if err != nil {
 							continue // Skip transactions that can't be simulated
 						}
-						// TODO: filter the logs
-
+						// filter the logs
+						relevant := filterRelevantLogs(logs)
+						if len(relevant) == 0 {
+							continue // no matching events
+						}
 						// construct the payload
 						rpcTx := ethapi.NewRPCPendingTransaction(tx, latest, chainConfig)
 						payload := map[string]interface{}{
 							"tx":   rpcTx,
-							"logs": logs,
+							"logs": relevant,
 						}
 						notifier.Notify(rpcSub.ID, payload)
 					} else {
@@ -300,6 +320,17 @@ func (api *FilterAPI) simulateTxForLogs(ctx context.Context, tx *types.Transacti
 	logs := statedb.GetLogs(tx.Hash(), header.Number.Uint64(), header.Hash(), header.Time)
 
 	return logs, nil
+}
+
+// filterRelevantLogs returns only logs whose first topic matches an allowed event.
+func filterRelevantLogs(logs []*types.Log) []*types.Log {
+	var result []*types.Log
+	for _, lg := range logs {
+		if len(lg.Topics) > 0 && allowedTopics[lg.Topics[0]] {
+			result = append(result, lg)
+		}
+	}
+	return result
 }
 
 // NewBlockFilter creates a filter that fetches blocks that are imported into the chain.
