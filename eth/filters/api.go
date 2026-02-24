@@ -32,7 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/eth"
+
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -304,17 +304,14 @@ func (api *FilterAPI) simulateTxForLogs(ctx context.Context, tx *types.Transacti
 	header := api.sys.backend.CurrentHeader()
 
 	// get the backend
-	backend, ok := api.sys.backend.(*eth.EthAPIBackend)
+	backend, ok := api.sys.backend.(ethapi.Backend)
 	if !ok {
-		return nil, errors.New("api.sys.backend is not eth.EthAPIBackend")
+		return nil, errors.New("api.sys.backend does not implement ethapi.Backend")
 	}
 	statedb, header, err := backend.StateAndHeaderByNumber(ctx, rpc.BlockNumber(header.Number.Int64()))
 	if err != nil {
 		return nil, err
 	}
-
-	// Create a copy of state for simulation
-	statedb = statedb.Copy()
 
 	// get evm
 	evm := backend.GetEVM(ctx, statedb, header, nil, nil)
@@ -356,6 +353,107 @@ func filterRelevantLogs(logs []*types.Log) []*types.Log {
 		}
 	}
 	return result
+}
+
+// isAfter reports whether a comes after b in blockchain order.
+func isAfter(a, b *types.Log) bool {
+	switch {
+	case a.BlockNumber != b.BlockNumber:
+		return a.BlockNumber > b.BlockNumber
+	case a.TxIndex != b.TxIndex:
+		return a.TxIndex > b.TxIndex
+	default:
+		return a.Index > b.Index
+	}
+}
+
+// PoolLogs subscribes to all pool-related logs. It delivers all the DeFi logs
+// in one block, deduplicated per pool so that only the latest state is sent.
+func (api *FilterAPI) PoolLogs(ctx context.Context) (*rpc.Subscription, error) {
+	notifier, supported := rpc.NotifierFromContext(ctx)
+	if !supported {
+		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
+	}
+
+	rpcSub := notifier.CreateSubscription()
+	matchedLogs := make(chan []*types.Log)
+
+	// Build the topic filter from allowed DEX event signatures
+	topics := make([]common.Hash, 0, len(allowedTopics))
+	for topic := range allowedTopics {
+		topics = append(topics, topic)
+	}
+	crit := ethereum.FilterQuery{
+		Topics: [][]common.Hash{topics},
+	}
+
+	logsSub, err := api.events.SubscribeLogs(crit, matchedLogs)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		defer logsSub.Unsubscribe()
+		for {
+			select {
+			case logs := <-matchedLogs:
+				// Grouping by (address, topic0, optional topic1)
+				type logKey struct {
+					Address    common.Address
+					Topic0     common.Hash
+					Topic1     common.Hash
+					TopicCount int
+				}
+				latest := make(map[logKey]*types.Log, len(logs))
+
+				for _, lg := range logs {
+					if len(lg.Topics) == 0 {
+						continue
+					}
+					sig := lg.Topics[0]
+					var key logKey
+
+					switch sig {
+					case UniswapV2SyncTopic:
+						// group by address only
+						key = logKey{Address: lg.Address, TopicCount: 0}
+
+					case UniswapV3SwapTopic, PancakeV3SwapTopic:
+						// group by address + signature
+						key = logKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
+
+					case UniswapV4SwapTopic:
+						// group by address + signature + first indexed topic (pool id)
+						key = logKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
+						if len(lg.Topics) > 1 {
+							key.Topic1 = lg.Topics[1]
+							key.TopicCount = 2
+						}
+
+					default:
+						continue
+					}
+
+					// keep only the most recent per key
+					if prev, ok := latest[key]; !ok || isAfter(lg, prev) {
+						latest[key] = lg
+					}
+				}
+
+				// collect into slice and notify
+				out := make([]*types.Log, 0, len(latest))
+				for _, lg := range latest {
+					out = append(out, lg)
+				}
+				notifier.Notify(rpcSub.ID, out)
+
+			case <-rpcSub.Err():
+				return
+			}
+		}
+	}()
+
+	return rpcSub, nil
 }
 
 // NewBlockFilter creates a filter that fetches blocks that are imported into the chain.
