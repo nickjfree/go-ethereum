@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum/go-ethereum/internal/ethapi"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -269,10 +270,13 @@ func (api *FilterAPI) NewPendingTransactionWithLogs(ctx context.Context, fullTx 
 							continue
 						}
 
+						simStart := time.Now()
 						logs, err := api.simulateTxForLogs(ctx, tx)
+						simDuration := time.Since(simStart)
 						if err != nil {
-							continue // Skip transactions that can't be simulated
+							continue
 						}
+						log.Info("Pending tx simulation completed", "tx", tx.Hash(), "logs", len(logs), "elapsed", simDuration)
 						// filter the logs
 						relevant := filterRelevantLogs(logs)
 						if len(relevant) == 0 {
