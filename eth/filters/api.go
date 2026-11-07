@@ -58,12 +58,17 @@ var (
 	PancakeV3SwapTopic = crypto.Keccak256Hash([]byte("Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)"))
 	// Uniswap V4: Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrt_price_x96, uint128 liquidity, int24 tick, uint24 fee)
 	UniswapV4SwapTopic = crypto.Keccak256Hash([]byte("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)"))
+	// Bancor V2: TokenRateUpdate(address indexed token1, address indexed token2, uint256 rateN, uint256 rateD).
+	// A trade emits one per pair of the pool's three tokens (two reserves and the pool token); only the pair of
+	// reserves holds both new balances.
+	BancorTokenRateUpdateTopic = crypto.Keccak256Hash([]byte("TokenRateUpdate(address,address,uint256,uint256)"))
 
 	allowedTopics = map[common.Hash]bool{
-		UniswapV2SyncTopic: true,
-		UniswapV3SwapTopic: true,
-		PancakeV3SwapTopic: true,
-		UniswapV4SwapTopic: true,
+		UniswapV2SyncTopic:         true,
+		UniswapV3SwapTopic:         true,
+		PancakeV3SwapTopic:         true,
+		UniswapV4SwapTopic:         true,
+		BancorTokenRateUpdateTopic: true,
 	}
 )
 
@@ -360,6 +365,71 @@ func filterRelevantLogs(logs []*types.Log) []*types.Log {
 	return result
 }
 
+// poolLogKey groups a pool's logs: the latest log per key is the pool's state.
+type poolLogKey struct {
+	Address    common.Address
+	Topic0     common.Hash
+	Topic1     common.Hash
+	TopicCount int
+}
+
+// latestPoolLogs keeps the most recent log per pool key, so only each pool's latest state is sent.
+func latestPoolLogs(logs []*types.Log) []*types.Log {
+	latest := make(map[poolLogKey]*types.Log, len(logs))
+
+	for _, lg := range logs {
+		if len(lg.Topics) == 0 {
+			continue
+		}
+		sig := lg.Topics[0]
+		var key poolLogKey
+
+		switch sig {
+		case UniswapV2SyncTopic:
+			// group by address only
+			key = poolLogKey{Address: lg.Address, TopicCount: 0}
+
+		case UniswapV3SwapTopic, PancakeV3SwapTopic:
+			// group by address + signature
+			key = poolLogKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
+
+		case UniswapV4SwapTopic:
+			// group by address + signature + first indexed topic (pool id)
+			key = poolLogKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
+			if len(lg.Topics) > 1 {
+				key.Topic1 = lg.Topics[1]
+				key.TopicCount = 2
+			}
+
+		case BancorTokenRateUpdateTopic:
+			// group by address + signature + the pair of tokens, whichever way round it traded: the pair of
+			// reserves must survive the pool token's logs that follow it in the same trade
+			if len(lg.Topics) < 3 {
+				continue
+			}
+			var pair common.Hash
+			for i := range pair {
+				pair[i] = lg.Topics[1][i] ^ lg.Topics[2][i]
+			}
+			key = poolLogKey{Address: lg.Address, Topic0: sig, Topic1: pair, TopicCount: 2}
+
+		default:
+			continue
+		}
+
+		// keep only the most recent per key
+		if prev, ok := latest[key]; !ok || isAfter(lg, prev) {
+			latest[key] = lg
+		}
+	}
+
+	out := make([]*types.Log, 0, len(latest))
+	for _, lg := range latest {
+		out = append(out, lg)
+	}
+	return out
+}
+
 // isAfter reports whether a comes after b in blockchain order.
 func isAfter(a, b *types.Log) bool {
 	switch {
@@ -402,55 +472,7 @@ func (api *FilterAPI) PoolLogs(ctx context.Context) (*rpc.Subscription, error) {
 		for {
 			select {
 			case logs := <-matchedLogs:
-				// Grouping by (address, topic0, optional topic1)
-				type logKey struct {
-					Address    common.Address
-					Topic0     common.Hash
-					Topic1     common.Hash
-					TopicCount int
-				}
-				latest := make(map[logKey]*types.Log, len(logs))
-
-				for _, lg := range logs {
-					if len(lg.Topics) == 0 {
-						continue
-					}
-					sig := lg.Topics[0]
-					var key logKey
-
-					switch sig {
-					case UniswapV2SyncTopic:
-						// group by address only
-						key = logKey{Address: lg.Address, TopicCount: 0}
-
-					case UniswapV3SwapTopic, PancakeV3SwapTopic:
-						// group by address + signature
-						key = logKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
-
-					case UniswapV4SwapTopic:
-						// group by address + signature + first indexed topic (pool id)
-						key = logKey{Address: lg.Address, Topic0: sig, TopicCount: 1}
-						if len(lg.Topics) > 1 {
-							key.Topic1 = lg.Topics[1]
-							key.TopicCount = 2
-						}
-
-					default:
-						continue
-					}
-
-					// keep only the most recent per key
-					if prev, ok := latest[key]; !ok || isAfter(lg, prev) {
-						latest[key] = lg
-					}
-				}
-
-				// collect into slice and notify
-				out := make([]*types.Log, 0, len(latest))
-				for _, lg := range latest {
-					out = append(out, lg)
-				}
-				notifier.Notify(rpcSub.ID, out)
+				notifier.Notify(rpcSub.ID, latestPoolLogs(logs))
 
 			case <-rpcSub.Err():
 				return
