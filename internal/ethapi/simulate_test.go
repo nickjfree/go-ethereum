@@ -17,6 +17,7 @@
 package ethapi
 
 import (
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -80,7 +81,10 @@ func TestSimulateSanitizeBlockOrder(t *testing.T) {
 			err:           "block timestamps must be in order: 72 <= 72",
 		},
 	} {
-		sim := &simulator{base: &types.Header{Number: big.NewInt(int64(tc.baseNumber)), Time: tc.baseTimestamp}}
+		sim := &simulator{
+			base:   &types.Header{Number: big.NewInt(int64(tc.baseNumber)), Time: tc.baseTimestamp},
+			budget: newGasBudget(0),
+		}
 		res, err := sim.sanitizeChain(tc.blocks)
 		if err != nil {
 			if err.Error() == tc.err {
@@ -118,4 +122,30 @@ func TestSimulateSanitizeBlockOrder(t *testing.T) {
 
 func newInt(n int64) *hexutil.Big {
 	return (*hexutil.Big)(big.NewInt(n))
+}
+
+func TestSimBlockUnmarshalOverrideKeys(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		err   string
+	}{
+		{input: `{"blockOverrides":{"number":"0x1","beaconRoot":"0x0000000000000000000000000000000000000000000000000000000000000001"},"stateOverrides":{"0xc000000000000000000000000000000000000000":{"balance":"0x1","movePrecompileToAddress":"0xc100000000000000000000000000000000000000"}}}`},
+		{input: `{"blockOverrides":null,"stateOverrides":null}`},
+		{input: `{"blockOverrides":{"bogusField":"0x1"}}`, err: `unknown field "bogusField" in block override`},
+		{input: `{"blockOverrides":{"Number":"0x1"}}`},
+		{input: `{"blockOverrides":{"number":"0x1","Number":"0x2"}}`, err: `keys "Number" and "number" in block override name the same field`},
+		{input: `{"blockOverrides":{},"blockOverrides":{"Bogus":"0x1"}}`, err: `unknown field "Bogus" in block override`},
+		{input: `{"stateOverrides":{"0xc000000000000000000000000000000000000000":{"bogusField":"0x1"}}}`, err: `unknown field "bogusField" in state override for 0xC000000000000000000000000000000000000000`},
+		{input: `{"stateOverrides":{"0xc000000000000000000000000000000000000000":{"Code":"0x00"}}}`},
+		{input: `{"stateOverrides":{"0xc000000000000000000000000000000000000000":{"code":"0x00","Code":"0x01"}}}`, err: `keys "Code" and "code" in state override for 0xC000000000000000000000000000000000000000 name the same field`},
+	} {
+		var b simBlock
+		err := json.Unmarshal([]byte(tc.input), &b)
+		switch {
+		case tc.err == "" && err != nil:
+			t.Errorf("%s: unexpected error: %v", tc.input, err)
+		case tc.err != "" && (err == nil || err.Error() != tc.err):
+			t.Errorf("%s: error mismatch: have %v, want %s", tc.input, err, tc.err)
+		}
+	}
 }

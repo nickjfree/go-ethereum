@@ -207,11 +207,13 @@ func (api *FilterAPI) NewPendingTransactions(ctx context.Context, fullTx *bool) 
 		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
 	}
 
-	rpcSub := notifier.CreateSubscription()
+	var (
+		rpcSub       = notifier.CreateSubscription()
+		txs          = make(chan []*types.Transaction, 128)
+		pendingTxSub = api.events.SubscribePendingTxs(txs)
+	)
 
 	go func() {
-		txs := make(chan []*types.Transaction, 128)
-		pendingTxSub := api.events.SubscribePendingTxs(txs)
 		defer pendingTxSub.Unsubscribe()
 
 		chainConfig := api.sys.backend.ChainConfig()
@@ -327,17 +329,16 @@ func (api *FilterAPI) simulateTxForLogs(ctx context.Context, tx *types.Transacti
 		return nil, err
 	}
 
-	// Set transaction context in state
-	statedb.SetTxContext(tx.Hash(), 0)
+	// Set transaction context in state: the first tx, block access index 1 (0 is the pre-execution system calls)
+	statedb.SetTxContext(tx.Hash(), 0, 1)
 
 	// Prepare state for transaction execution
 	statedb.Prepare(evm.ChainConfig().Rules(header.Number, true, header.Time), msg.From, header.Coinbase, msg.To, nil, tx.AccessList())
 
 	// Execute the transaction
-	gasPool := new(core.GasPool).AddGas(header.GasLimit)
-	var usedGas uint64
+	gasPool := core.NewGasPool(header.GasLimit)
 
-	_, err = core.ApplyTransactionWithEVM(msg, gasPool, statedb, header.Number, header.Hash(), header.Time, tx, &usedGas, evm)
+	_, _, err = core.ApplyTransactionWithEVM(ctx, msg, gasPool, statedb, header.Number, header.Hash(), header.Time, tx, evm)
 	if err != nil {
 		return nil, err
 	}
@@ -501,11 +502,13 @@ func (api *FilterAPI) NewHeads(ctx context.Context) (*rpc.Subscription, error) {
 		return &rpc.Subscription{}, rpc.ErrNotificationsUnsupported
 	}
 
-	rpcSub := notifier.CreateSubscription()
+	var (
+		rpcSub     = notifier.CreateSubscription()
+		headers    = make(chan *types.Header)
+		headersSub = api.events.SubscribeNewHeads(headers)
+	)
 
 	go func() {
-		headers := make(chan *types.Header)
-		headersSub := api.events.SubscribeNewHeads(headers)
 		defer headersSub.Unsubscribe()
 
 		for {
@@ -715,7 +718,7 @@ func (api *FilterAPI) GetLogs(ctx context.Context, crit FilterCriteria) ([]*type
 			end = crit.ToBlock.Int64()
 		}
 		// Block numbers below 0 are special cases.
-		if begin > 0 && end > 0 && begin > end {
+		if begin >= 0 && end >= 0 && begin > end {
 			return nil, errInvalidBlockRange
 		}
 		if begin >= 0 && begin < int64(api.events.backend.HistoryPruningCutoff()) {
@@ -772,6 +775,9 @@ func (api *FilterAPI) GetFilterLogs(ctx context.Context, id rpc.ID) ([]*types.Lo
 		end := rpc.LatestBlockNumber.Int64()
 		if f.crit.ToBlock != nil {
 			end = f.crit.ToBlock.Int64()
+		}
+		if begin >= 0 && begin < int64(api.events.backend.HistoryPruningCutoff()) {
+			return nil, &history.PrunedHistoryError{}
 		}
 		// Construct the range filter
 		filter = api.sys.NewRangeFilter(begin, end, f.crit.Addresses, f.crit.Topics, api.rangeLimit)

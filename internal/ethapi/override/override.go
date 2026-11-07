@@ -19,7 +19,9 @@ package override
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -27,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -58,9 +61,13 @@ func (diff *StateOverride) Apply(statedb *state.StateDB, precompiles vm.Precompi
 	if diff == nil {
 		return nil
 	}
+	// Iterate in deterministic order so error messages and behavior are stable (e.g. for tests).
+	addrs := slices.SortedFunc(maps.Keys(*diff), common.Address.Cmp)
+
 	// Tracks destinations of precompiles that were moved.
 	dirtyAddrs := make(map[common.Address]struct{})
-	for addr, account := range *diff {
+	for _, addr := range addrs {
+		account := (*diff)[addr]
 		// If a precompile was moved to this address already, it can't be overridden.
 		if _, ok := dirtyAddrs[addr]; ok {
 			return fmt.Errorf("account %s has already been overridden by a precompile", addr.Hex())
@@ -115,14 +122,14 @@ func (diff *StateOverride) Apply(statedb *state.StateDB, precompiles vm.Precompi
 	// Now finalize the changes. Finalize is normally performed between transactions.
 	// By using finalize, the overrides are semantically behaving as
 	// if they were created in a transaction just before the tracing occur.
-	statedb.Finalise(false)
+	statedb.Finalise(params.Rules{})
 	return nil
 }
 
 // BlockOverrides is a set of header fields to override.
 type BlockOverrides struct {
 	Number        *hexutil.Big
-	Difficulty    *hexutil.Big // No-op if we're simulating post-merge calls.
+	Difficulty    *hexutil.Big // No-op post-merge outside eth_simulateV1, which rejects it.
 	Time          *hexutil.Uint64
 	GasLimit      *hexutil.Uint64
 	FeeRecipient  *common.Address
@@ -183,7 +190,8 @@ func (o *BlockOverrides) MakeHeader(header *types.Header) *types.Header {
 	if o.Number != nil {
 		h.Number = o.Number.ToInt()
 	}
-	if o.Difficulty != nil {
+	// Difficulty is a no-op on post-merge (zero-difficulty) headers.
+	if o.Difficulty != nil && (h.Difficulty == nil || h.Difficulty.Sign() != 0) {
 		h.Difficulty = o.Difficulty.ToInt()
 	}
 	if o.Time != nil {

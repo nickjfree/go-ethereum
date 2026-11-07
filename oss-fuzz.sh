@@ -35,7 +35,7 @@ function coverbuild {
   sed -i -e 's/TestFuzzCorpus/Test'$function'Corpus/' ./"${function,,}"_test.go
 
 cat << DOG > $OUT/$fuzzer
-#/bin/sh
+#!/bin/sh
 
   cd $OUT/$path
   go test -run Test${function}Corpus -v $tags -coverprofile \$1 -coverpkg $coverpkg
@@ -163,6 +163,14 @@ compile_fuzzer github.com/ethereum/go-ethereum/tests/fuzzers/bn256 \
 compile_fuzzer github.com/ethereum/go-ethereum/tests/fuzzers/txfetcher \
   Fuzz fuzzTxfetcher \
   $repo/tests/fuzzers/txfetcher/txfetcher_test.go
+
+compile_fuzzer github.com/ethereum/go-ethereum/tests/fuzzers/evm \
+  FuzzCode fuzzEvmCode \
+  $repo/tests/fuzzers/evm/evm_test.go
+
+compile_fuzzer github.com/ethereum/go-ethereum/tests/fuzzers/evm \
+  FuzzDeepStack fuzzEvmDeepStack \
+  $repo/tests/fuzzers/evm/evm_test.go
 
 compile_fuzzer github.com/ethereum/go-ethereum/tests/fuzzers/bls12381 \
   FuzzG1Add fuzz_g1_add\

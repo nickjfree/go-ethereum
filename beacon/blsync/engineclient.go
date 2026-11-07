@@ -87,6 +87,10 @@ func (ec *engineClient) updateLoop(headCh <-chan types.ChainHeadEvent) {
 			if status, err := ec.callForkchoiceUpdated(forkName, event); err == nil {
 				log.Info("Successful ForkchoiceUpdated", "head", event.Block.Hash(), "status", status)
 			} else {
+				if err.Error() == "beacon syncer reorging" {
+					log.Debug("Failed ForkchoiceUpdated", "head", event.Block.Hash(), "error", err)
+					continue // ignore beacon syncer reorging errors, this error can occur if the blsync is skipping a block
+				}
 				log.Error("Failed ForkchoiceUpdated", "head", event.Block.Hash(), "error", err)
 			}
 		}
@@ -110,8 +114,18 @@ func (ec *engineClient) callNewPayload(fork string, event types.ChainHeadEvent) 
 		parentBeaconRoot := event.BeaconHead.ParentRoot
 		blobHashes := collectBlobHashes(event.Block)
 		params = append(params, blobHashes, parentBeaconRoot)
-	default: // electra, fulu and above
+	case "electra", "fulu":
 		method = "engine_newPayloadV4"
+		parentBeaconRoot := event.BeaconHead.ParentRoot
+		blobHashes := collectBlobHashes(event.Block)
+		hexRequests := make([]hexutil.Bytes, len(event.ExecRequests))
+		for i := range event.ExecRequests {
+			hexRequests[i] = hexutil.Bytes(event.ExecRequests[i])
+		}
+		params = append(params, blobHashes, parentBeaconRoot, hexRequests)
+	default:
+		// gloas and above
+		method = "engine_newPayloadV5"
 		parentBeaconRoot := event.BeaconHead.ParentRoot
 		blobHashes := collectBlobHashes(event.Block)
 		hexRequests := make([]hexutil.Bytes, len(event.ExecRequests))
@@ -123,6 +137,7 @@ func (ec *engineClient) callNewPayload(fork string, event types.ChainHeadEvent) 
 
 	ctx, cancel := context.WithTimeout(ec.rootCtx, time.Second*5)
 	defer cancel()
+
 	var resp engine.PayloadStatusV1
 	err := ec.rpc.CallContext(ctx, &resp, method, params...)
 	return resp.Status, err
@@ -142,17 +157,17 @@ func (ec *engineClient) callForkchoiceUpdated(fork string, event types.ChainHead
 		SafeBlockHash:      event.Finalized,
 		FinalizedBlockHash: event.Finalized,
 	}
-
 	var method string
 	switch fork {
 	case "altair", "bellatrix":
 		method = "engine_forkchoiceUpdatedV1"
 	case "capella":
 		method = "engine_forkchoiceUpdatedV2"
-	default: // deneb, electra, fulu and above
+	case "deneb", "electra", "fulu":
 		method = "engine_forkchoiceUpdatedV3"
+	case "gloas":
+		method = "engine_forkchoiceUpdatedV4"
 	}
-
 	ctx, cancel := context.WithTimeout(ec.rootCtx, time.Second*5)
 	defer cancel()
 	var resp engine.ForkChoiceResponse
